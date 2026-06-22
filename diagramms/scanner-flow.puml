@@ -1,0 +1,36 @@
+@startuml
+title Filesystem Scanner Flow
+
+start
+:Validate root path;
+:Create root FileNode;
+:Start bounded worker pool;
+:Queue root directory;
+
+while (Pending directories?) is (yes)
+  :Worker reads directory with os.scandir;
+  if (Entry is symlink?) then (yes)
+    :Skip entry;
+  else (no)
+    if (Entry is directory?) then (yes)
+      if (Directory is excluded by name, path, or filesystem type?) then (yes)
+        :Skip directory before scanning;
+      else (no)
+        :Create directory FileNode;
+        :Queue child directory;
+      endif
+    else (no)
+      :Read stat metadata;
+      :Use allocated blocks when available;
+      :Create file FileNode;
+      :Update progress counters;
+    endif
+  endif
+endwhile (no)
+
+:Compute aggregate directory sizes;
+:Sort children by size descending;
+:Return FileNode tree;
+stop
+
+@enduml

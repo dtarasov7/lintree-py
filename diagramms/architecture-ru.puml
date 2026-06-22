@@ -1,0 +1,39 @@
+@startuml
+title Архитектура lintree-py
+
+skinparam componentStyle rectangle
+
+actor "Пользователь" as User
+
+component "Парсер CLI" as CLI
+component "LintreeApp" as App
+component "TerminalController" as Terminal
+component "ScanJob" as Job
+component "ConcurrentScanner" as Scanner
+component "Дерево FileNode" as Tree
+component "Раскладка Treemap" as Layout
+component "Canvas Renderer" as Canvas
+
+User --> CLI : запуск команды
+CLI --> App : путь и флаги
+App --> Job : старт сканирования
+Job --> Scanner : пул рабочих потоков
+Scanner --> Tree : заполнение узлов
+App --> Tree : фокус и навигация
+App --> Layout : видимые дочерние элементы
+Layout --> App : ячейки
+App --> Canvas : отрисовка кадра
+Canvas --> Terminal : ANSI-вывод
+Terminal --> App : клавиши и мышь
+
+note right of Scanner
+Пропускает символические ссылки
+и выбранные виртуальные ФС.
+end note
+
+note bottom of Layout
+Поддерживает wide-режим
+и square-режим treemap.
+end note
+
+@enduml

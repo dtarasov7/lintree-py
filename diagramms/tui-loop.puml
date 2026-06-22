@@ -1,0 +1,29 @@
+@startuml
+title TUI Event Loop and Navigation
+
+start
+:Enter alternate screen;
+:Start ScanJob;
+
+while (User has not quit?) is (yes)
+  if (Scan still running?) then (yes)
+    :Read progress snapshot;
+    :Draw scan progress screen;
+  else (no)
+    :Read keyboard or mouse event;
+    if (Event changes focus?) then (yes)
+      :Update cursor, focus, or layout mode;
+      :Rebuild treemap cells;
+    endif
+    :Draw breadcrumbs;
+    :Draw treemap;
+    :Draw sidebar;
+    :Draw status bar;
+  endif
+endwhile (no)
+
+:Cancel scan if needed;
+:Restore terminal;
+stop
+
+@enduml
