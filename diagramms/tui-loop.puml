@@ -11,14 +11,14 @@ while (User has not quit?) is (yes)
     :Draw scan progress screen;
   else (no)
     :Read keyboard or mouse event;
-    if (Event changes focus?) then (yes)
-      :Update cursor, focus, or layout mode;
+    if (Event changes view state?) then (yes)
+      :Update cursor, focus, layout mode, or display metric;
       :Rebuild treemap cells;
     endif
     :Draw breadcrumbs;
-    :Draw treemap;
-    :Draw sidebar;
-    :Draw status bar;
+    :Draw treemap using active metric;
+    :Draw sidebar with active metric values;
+    :Draw status bar with m:size or m:files;
   endif
 endwhile (no)
 

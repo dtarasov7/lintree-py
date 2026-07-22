@@ -41,7 +41,7 @@ except ImportError:  # pragma: no cover - unavailable on Unix.
     msvcrt = None  # type: ignore
 
 
-__VERSION__ = "1.0.0"
+__VERSION__ = "1.2.0"
 
 # English: layout constants mirror the Go lintree proportions.
 # Русский: константы раскладки повторяют пропорции оригинального lintree на Go.
@@ -57,6 +57,9 @@ DEFAULT_NETWORK_FS_TYPES = {"nfs", "nfs4", "cifs", "smbfs", "smb3", "fuse.smbnet
 RGB = Tuple[int, int, int]
 Style = Tuple[RGB, RGB, bool]
 Key = Union[str, Tuple[str, int, int]]
+
+DISPLAY_METRIC_SIZE = "size"
+DISPLAY_METRIC_FILES = "files"
 
 
 BG_MAIN = (20, 22, 26)
@@ -265,6 +268,13 @@ def count_text(value: int) -> str:
     """
 
     return f"{value:,}"
+
+
+def files_text(value: int) -> str:
+    """Format a file count with a short unit label."""
+
+    unit = "file" if value == 1 else "files"
+    return f"{count_text(value)} {unit}"
 
 
 def size_text(num_bytes: int) -> str:
@@ -713,23 +723,29 @@ class FileNode:
             return parts[0]
         return os.path.join(*parts)
 
-    def top_children(self, limit: int) -> List["FileNode"]:
-        """Return largest children and an aggregate remainder.
+    def top_children(self, limit: int, display_metric: str = DISPLAY_METRIC_SIZE) -> List["FileNode"]:
+        """Return top children for a display metric and an aggregate remainder.
 
         Args:
             limit (int): Maximum number of real children to keep.
+            display_metric (str): Metric used for sorting and aggregate visibility.
 
         Returns:
             List[FileNode]: Child list with optional synthetic "(N other)" node.
         """
 
-        if len(self.children) <= limit:
-            return self.children
-        top = list(self.children[:limit])
+        sorted_children = sorted(
+            self.children,
+            key=lambda item: (node_metric(item, display_metric), item.size),
+            reverse=True,
+        )
+        if len(sorted_children) <= limit:
+            return sorted_children
+        top = list(sorted_children[:limit])
         other_size = 0
         other_files = 0
         other_dirs = 0
-        for child in self.children[limit:]:
+        for child in sorted_children[limit:]:
             other_size += child.size
             other_files += child.file_count
             other_dirs += child.dir_count
@@ -737,13 +753,30 @@ class FileNode:
                 other_dirs += 1
             else:
                 other_files += 1
-        if other_size > 0:
-            other = FileNode(f"({len(self.children) - limit} other)", True, self)
+        if other_size > 0 or other_files > 0:
+            other = FileNode(f"({len(sorted_children) - limit} other)", True, self)
             other.size = other_size
             other.file_count = other_files
             other.dir_count = other_dirs
-            top.append(other)
+            if node_metric(other, display_metric) > 0:
+                top.append(other)
         return top
+
+
+def node_metric(node: FileNode, display_metric: str) -> int:
+    """Return the active treemap weight for a node."""
+
+    if display_metric == DISPLAY_METRIC_FILES:
+        return node.file_count if node.is_dir else 1
+    return node.size
+
+
+def metric_text(node: FileNode, display_metric: str) -> str:
+    """Format a node value for the active display metric."""
+
+    if display_metric == DISPLAY_METRIC_FILES:
+        return files_text(node_metric(node, display_metric))
+    return size_text(node.size)
 
 
 def compute_sizes_and_sort(root: FileNode) -> None:
@@ -1190,11 +1223,11 @@ class RowItem:
     Русский: внутренний элемент строки алгоритма treemap.
     """
 
-    __slots__ = ("node", "size")
+    __slots__ = ("node", "weight")
 
-    def __init__(self, node: FileNode, size: int) -> None:
+    def __init__(self, node: FileNode, weight: int) -> None:
         self.node = node
-        self.size = size
+        self.weight = weight
 
 
 def layout_treemap(
@@ -1202,16 +1235,18 @@ def layout_treemap(
     bounds: Rect,
     depth: int = 0,
     wide_layout: bool = False,
+    display_metric: str = DISPLAY_METRIC_SIZE,
 ) -> List[Cell]:
     """Compute treemap layout for visible filesystem nodes.
 
     Русский: вычисляет treemap-раскладку для видимых узлов.
 
     Args:
-        nodes (Sequence[FileNode]): Nodes to lay out; zero-size nodes are ignored.
+        nodes (Sequence[FileNode]): Nodes to lay out; zero-value nodes are ignored.
         bounds (Rect): Rectangle to fill.
         depth (int): Nesting depth label retained for parity with lintree.
         wide_layout (bool): Prefer horizontal strips so major areas are wider than tall.
+        display_metric (str): Metric used as each node's treemap weight.
 
     Returns:
         List[Cell]: Treemap cells clipped to bounds.
@@ -1219,62 +1254,66 @@ def layout_treemap(
 
     if bounds.w < 1 or bounds.h < 1 or not nodes:
         return []
-    filtered = [node for node in nodes if node.size > 0]
-    total_size = sum(node.size for node in filtered)
-    if total_size <= 0:
+    filtered = [node for node in nodes if node_metric(node, display_metric) > 0]
+    total_weight = sum(node_metric(node, display_metric) for node in filtered)
+    if total_weight <= 0:
         return []
-    return _squarify(filtered, total_size, bounds, depth, wide_layout)
+    return _squarify(filtered, total_weight, bounds, depth, wide_layout, display_metric)
 
 
 def _squarify(
     nodes: Sequence[FileNode],
-    total_size: int,
+    total_weight: int,
     bounds: Rect,
     depth: int,
     wide_layout: bool,
+    display_metric: str,
 ) -> List[Cell]:
     """Arrange nodes using the Bruls-Huizing-van Wijk squarify strategy.
 
     Args:
-        nodes (Sequence[FileNode]): Positive-size nodes sorted by size.
-        total_size (int): Total size of nodes in the current area.
+        nodes (Sequence[FileNode]): Positive-value nodes sorted by display metric.
+        total_weight (int): Total metric weight of nodes in the current area.
         bounds (Rect): Rectangle to fill.
         depth (int): Treemap nesting depth.
         wide_layout (bool): Force wide horizontal rows when True.
+        display_metric (str): Metric used as each node's treemap weight.
 
     Returns:
         List[Cell]: Computed treemap cells.
     """
 
     remaining = Rect(bounds.x, bounds.y, bounds.w, bounds.h)
-    remaining_size = total_size
+    remaining_weight = total_weight
     cells: List[Cell] = []
     index = 0
 
     while index < len(nodes) and remaining.w > 0 and remaining.h > 0:
-        row = [RowItem(nodes[index], nodes[index].size)]
-        row_size = nodes[index].size
+        node_weight = node_metric(nodes[index], display_metric)
+        row = [RowItem(nodes[index], node_weight)]
+        row_weight = node_weight
         index += 1
 
         while index < len(nodes):
             candidate = nodes[index]
-            candidate_row = row + [RowItem(candidate, candidate.size)]
-            new_size = row_size + candidate.size
+            candidate_weight = node_metric(candidate, display_metric)
+            candidate_row = row + [RowItem(candidate, candidate_weight)]
+            new_weight = row_weight + candidate_weight
             # English: wide mode rejects rows that would create tall slivers.
             # Русский: wide-режим не добавляет элемент, если он даст высокую щель.
-            if wide_layout and not _wide_row_is_landscape(candidate_row, new_size, remaining, remaining_size):
+            if wide_layout and not _wide_row_is_landscape(candidate_row, new_weight, remaining, remaining_weight):
                 break
-            if _worst_ratio(row, row_size, remaining, remaining_size, wide_layout) >= _worst_ratio(
-                candidate_row, new_size, remaining, remaining_size, wide_layout
+            if _worst_ratio(row, row_weight, remaining, remaining_weight, wide_layout) >= _worst_ratio(
+                candidate_row, new_weight, remaining, remaining_weight, wide_layout
             ):
-                row.append(RowItem(candidate, candidate.size))
-                row_size = new_size
+                row.append(RowItem(candidate, candidate_weight))
+                row_weight = new_weight
                 index += 1
             else:
                 break
 
         horizontal_strip = _row_uses_horizontal_strip(remaining, wide_layout)
-        consumed = _layout_row(row, row_size, remaining, remaining_size, depth, cells, horizontal_strip)
+        consumed = _layout_row(row, row_weight, remaining, remaining_weight, depth, cells, horizontal_strip)
 
         if horizontal_strip:
             remaining.y += consumed
@@ -1282,7 +1321,7 @@ def _squarify(
         else:
             remaining.x += consumed
             remaining.w -= consumed
-        remaining_size -= row_size
+        remaining_weight -= row_weight
 
     return cells
 
@@ -1310,29 +1349,29 @@ def _row_uses_horizontal_strip(bounds: Rect, wide_layout: bool) -> bool:
 
 def _wide_row_is_landscape(
     row: Sequence[RowItem],
-    row_size: int,
+    row_weight: int,
     bounds: Rect,
-    total_size: int,
+    total_weight: int,
 ) -> bool:
     """Check whether a horizontal row keeps all items wider than tall.
 
     Args:
         row (Sequence[RowItem]): Candidate row items.
-        row_size (int): Total row size.
+        row_weight (int): Total row weight.
         bounds (Rect): Remaining rectangle.
-        total_size (int): Remaining total size.
+        total_weight (int): Remaining total metric weight.
 
     Returns:
         bool: True when every candidate cell has width greater than or equal to height.
     """
 
-    if not row or row_size <= 0 or total_size <= 0 or bounds.w <= 0 or bounds.h <= 0:
+    if not row or row_weight <= 0 or total_weight <= 0 or bounds.w <= 0 or bounds.h <= 0:
         return False
 
-    strip_h = clamp(go_round(float(bounds.h) * float(row_size) / float(total_size)), 1, bounds.h)
+    strip_h = clamp(go_round(float(bounds.h) * float(row_weight) / float(total_weight)), 1, bounds.h)
     x = bounds.x
     for idx, item in enumerate(row):
-        frac = float(item.size) / float(row_size)
+        frac = float(item.weight) / float(row_weight)
         item_w = max(1, go_round(float(bounds.w) * frac))
         if idx == len(row) - 1:
             item_w = bounds.w - (x - bounds.x)
@@ -1344,29 +1383,29 @@ def _wide_row_is_landscape(
 
 def _worst_ratio(
     row: Sequence[RowItem],
-    row_size: int,
+    row_weight: int,
     bounds: Rect,
-    total_size: int,
+    total_weight: int,
     wide_layout: bool,
 ) -> float:
     """Return the worst aspect ratio for a candidate treemap row.
 
     Args:
         row (Sequence[RowItem]): Candidate row.
-        row_size (int): Sum of item sizes in the row.
+        row_weight (int): Sum of item weights in the row.
         bounds (Rect): Remaining rectangle.
-        total_size (int): Remaining total size.
+        total_weight (int): Remaining total metric weight.
         wide_layout (bool): Whether wide row rules are active.
 
     Returns:
         float: Worst aspect ratio, or infinity for invalid input.
     """
 
-    if not row or total_size <= 0 or row_size <= 0:
+    if not row or total_weight <= 0 or row_weight <= 0:
         return float("inf")
 
     total_area = float(bounds.w * bounds.h)
-    row_area = total_area * float(row_size) / float(total_size)
+    row_area = total_area * float(row_weight) / float(total_weight)
     effective_w = float(bounds.w) * CELL_ASPECT
     effective_h = float(bounds.h)
     strip_len = effective_w if _row_uses_horizontal_strip(bounds, wide_layout) else effective_h
@@ -1375,7 +1414,7 @@ def _worst_ratio(
 
     worst = 0.0
     for item in row:
-        frac = float(item.size) / float(row_size)
+        frac = float(item.weight) / float(row_weight)
         item_area = row_area * frac
         if item_area <= 0:
             continue
@@ -1392,9 +1431,9 @@ def _worst_ratio(
 
 def _layout_row(
     row: Sequence[RowItem],
-    row_size: int,
+    row_weight: int,
     bounds: Rect,
-    total_size: int,
+    total_weight: int,
     depth: int,
     cells: List[Cell],
     horizontal_strip: bool,
@@ -1403,9 +1442,9 @@ def _layout_row(
 
     Args:
         row (Sequence[RowItem]): Items in the row.
-        row_size (int): Sum of item sizes in the row.
+        row_weight (int): Sum of item weights in the row.
         bounds (Rect): Remaining rectangle.
-        total_size (int): Remaining total size.
+        total_weight (int): Remaining total metric weight.
         depth (int): Treemap nesting depth.
         cells (List[Cell]): Output list to append to.
         horizontal_strip (bool): True when row consumes height.
@@ -1414,15 +1453,15 @@ def _layout_row(
         int: Consumed height for horizontal strips or consumed width otherwise.
     """
 
-    if not row or total_size <= 0:
+    if not row or total_weight <= 0:
         return 0
-    row_frac = float(row_size) / float(total_size)
+    row_frac = float(row_weight) / float(total_weight)
 
     if horizontal_strip:
         strip_h = clamp(go_round(float(bounds.h) * row_frac), 1, bounds.h)
         x = bounds.x
         for idx, item in enumerate(row):
-            frac = float(item.size) / float(row_size)
+            frac = float(item.weight) / float(row_weight)
             w = max(1, go_round(float(bounds.w) * frac))
             if idx == len(row) - 1:
                 w = bounds.w - (x - bounds.x)
@@ -1437,7 +1476,7 @@ def _layout_row(
     strip_w = clamp(go_round(float(bounds.w) * row_frac), 1, bounds.w)
     y = bounds.y
     for idx, item in enumerate(row):
-        frac = float(item.size) / float(row_size)
+        frac = float(item.weight) / float(row_weight)
         h = max(1, go_round(float(bounds.h) * frac))
         if idx == len(row) - 1:
             h = bounds.h - (y - bounds.y)
@@ -1760,6 +1799,7 @@ class LintreeApp:
         self.root_path = root_path
         self.fast = fast
         self.wide_layout = wide_layout
+        self.display_metric = DISPLAY_METRIC_SIZE
         self.scan_job = ScanJob(root_path, fast, exclude_dir_values, exclude_network_fs, exclude_fs_types)
         self.root: Optional[FileNode] = None
         self.focus: Optional[FileNode] = None
@@ -1877,16 +1917,22 @@ class LintreeApp:
             self._drill_in()
         elif key == "backspace" or key == "h":
             self._go_back()
-        elif key == "up" or key == "k":
-            self._move_cursor(-1, horizontal=False)
-        elif key == "down" or key == "j":
-            self._move_cursor(1, horizontal=False)
+        elif key == "up":
+            self._move_cursor_spatial(0, -1)
+        elif key == "down":
+            self._move_cursor_spatial(0, 1)
+        elif key == "k":
+            self._move_cursor_linear(-1)
+        elif key == "j":
+            self._move_cursor_linear(1)
         elif key == "left":
-            self._move_cursor(-1, horizontal=True)
+            self._move_cursor_spatial(-1, 0)
         elif key == "right":
-            self._move_cursor(1, horizontal=True)
+            self._move_cursor_spatial(1, 0)
         elif key == "o" or key == "O":
             self._toggle_layout()
+        elif key == "m" or key == "M":
+            self._toggle_display_metric()
         elif key == "?":
             self.show_help = True
         return False
@@ -1900,12 +1946,11 @@ class LintreeApp:
                 self.cursor = idx
                 break
 
-    def _move_cursor(self, delta: int, horizontal: bool) -> None:
-        """Move selection in visual order or spatially between cells.
+    def _move_cursor_linear(self, delta: int) -> None:
+        """Move selection in visual reading order.
 
         Args:
-            delta (int): Direction; negative moves backward/left, positive forward/right.
-            horizontal (bool): True for spatial left/right movement.
+            delta (int): Direction; negative moves backward, positive moves forward.
 
         Returns:
             None: Cursor is updated in-place when a target exists.
@@ -1913,35 +1958,47 @@ class LintreeApp:
 
         if not self.cells:
             return
-        if not horizontal:
-            ordered = self._visual_order_indices()
-            try:
-                order_pos = ordered.index(self.cursor)
-            except ValueError:
-                order_pos = 0
-            order_pos = clamp(order_pos + delta, 0, len(ordered) - 1)
-            self.cursor = ordered[order_pos]
-            return
+        ordered = self._visual_order_indices()
+        try:
+            order_pos = ordered.index(self.cursor)
+        except ValueError:
+            order_pos = 0
+        order_pos = clamp(order_pos + delta, 0, len(ordered) - 1)
+        self.cursor = ordered[order_pos]
 
+    def _move_cursor_spatial(self, dx: int, dy: int) -> None:
+        """Move selection toward a geometric neighbor.
+
+        Args:
+            dx (int): Horizontal direction, -1 for left, 1 for right, 0 otherwise.
+            dy (int): Vertical direction, -1 for up, 1 for down, 0 otherwise.
+
+        Returns:
+            None: Cursor is updated in-place when a neighbor exists.
+        """
+
+        if not self.cells or (dx == 0 and dy == 0):
+            return
         current = self.cells[self.cursor].rect
         cur_mid_x = current.x + current.w // 2
         cur_mid_y = current.y + current.h // 2
-        best = -1
-        best_score: Optional[Tuple[int, int, int, int]] = None
-        for idx, cell in enumerate(self.cells):
-            if idx == self.cursor:
-                continue
-            rect = cell.rect
-            mid_x = rect.x + rect.w // 2
-            mid_y = rect.y + rect.h // 2
-            if (delta > 0 and mid_x <= cur_mid_x) or (delta < 0 and mid_x >= cur_mid_x):
-                continue
-            score = self._horizontal_nav_score(current, rect, cur_mid_x, cur_mid_y, delta)
-            if best_score is None or score < best_score:
-                best_score = score
-                best = idx
-        if best >= 0:
-            self.cursor = best
+
+        for strict_edges in (True, False):
+            best = -1
+            best_score: Optional[Tuple[int, int, int, int, int]] = None
+            for idx, cell in enumerate(self.cells):
+                if idx == self.cursor:
+                    continue
+                rect = cell.rect
+                if not self._rect_is_in_direction(current, rect, cur_mid_x, cur_mid_y, dx, dy, strict_edges):
+                    continue
+                score = self._spatial_nav_score(current, rect, cur_mid_x, cur_mid_y, dx, dy, idx)
+                if best_score is None or score < best_score:
+                    best_score = score
+                    best = idx
+            if best >= 0:
+                self.cursor = best
+                return
 
     def _visual_order_indices(self) -> List[int]:
         """Return cell indices in screen reading order.
@@ -1954,46 +2011,99 @@ class LintreeApp:
         # Русский: порядок создания ячеек может отличаться от видимых строк в wide-режиме.
         return sorted(range(len(self.cells)), key=lambda idx: (self.cells[idx].rect.y, self.cells[idx].rect.x, idx))
 
-    def _horizontal_nav_score(
+    def _rect_is_in_direction(
         self,
         current: Rect,
         candidate: Rect,
         cur_mid_x: int,
         cur_mid_y: int,
-        delta: int,
-    ) -> Tuple[int, int, int, int]:
-        """Score a left/right navigation candidate.
+        dx: int,
+        dy: int,
+        strict_edges: bool,
+    ) -> bool:
+        """Check whether a rectangle is in the requested direction.
 
         Args:
             current (Rect): Currently selected rectangle.
             candidate (Rect): Candidate rectangle.
             cur_mid_x (int): Current rectangle center X.
             cur_mid_y (int): Current rectangle center Y.
-            delta (int): Direction, negative for left and positive for right.
+            dx (int): Horizontal direction.
+            dy (int): Vertical direction.
+            strict_edges (bool): Use edge-to-edge direction before center fallback.
 
         Returns:
-            Tuple[int, int, int, int]: Sortable score; smaller means a better spatial neighbor.
+            bool: True when candidate is eligible.
         """
-
-        # English: vertical overlap keeps navigation inside the same visual row.
-        # Русский: вертикальное пересечение удерживает переход в той же визуальной строке.
-        vertical_overlap = max(
-            0,
-            min(current.y + current.h, candidate.y + candidate.h) - max(current.y, candidate.y),
-        )
-        same_band_penalty = 0 if vertical_overlap > 0 else 1
-
-        if delta > 0:
-            horizontal_gap = max(0, candidate.x - (current.x + current.w))
-        else:
-            horizontal_gap = max(0, current.x - (candidate.x + candidate.w))
 
         cand_mid_x = candidate.x + candidate.w // 2
         cand_mid_y = candidate.y + candidate.h // 2
-        cross_axis_distance = 0 if vertical_overlap > 0 else abs(cand_mid_y - cur_mid_y)
-        main_axis_distance = abs(cand_mid_x - cur_mid_x)
+        if dx > 0:
+            return candidate.x >= current.x + current.w if strict_edges else cand_mid_x > cur_mid_x
+        if dx < 0:
+            return candidate.x + candidate.w <= current.x if strict_edges else cand_mid_x < cur_mid_x
+        if dy > 0:
+            return candidate.y >= current.y + current.h if strict_edges else cand_mid_y > cur_mid_y
+        if dy < 0:
+            return candidate.y + candidate.h <= current.y if strict_edges else cand_mid_y < cur_mid_y
+        return False
 
-        return (same_band_penalty, horizontal_gap, cross_axis_distance, main_axis_distance)
+    def _spatial_nav_score(
+        self,
+        current: Rect,
+        candidate: Rect,
+        cur_mid_x: int,
+        cur_mid_y: int,
+        dx: int,
+        dy: int,
+        idx: int,
+    ) -> Tuple[int, int, int, int, int]:
+        """Score a spatial navigation candidate.
+
+        Args:
+            current (Rect): Currently selected rectangle.
+            candidate (Rect): Candidate rectangle.
+            cur_mid_x (int): Current rectangle center X.
+            cur_mid_y (int): Current rectangle center Y.
+            dx (int): Horizontal direction.
+            dy (int): Vertical direction.
+            idx (int): Candidate index for stable tie-breaking.
+
+        Returns:
+            Tuple[int, int, int, int, int]: Sortable score; smaller means better.
+        """
+
+        cand_mid_x = candidate.x + candidate.w // 2
+        cand_mid_y = candidate.y + candidate.h // 2
+        if dx != 0:
+            # English: vertical overlap keeps left/right movement in the same visual row.
+            # Русский: вертикальное пересечение удерживает left/right в той же строке.
+            cross_overlap = max(
+                0,
+                min(current.y + current.h, candidate.y + candidate.h) - max(current.y, candidate.y),
+            )
+            if dx > 0:
+                main_gap = max(0, candidate.x - (current.x + current.w))
+            else:
+                main_gap = max(0, current.x - (candidate.x + candidate.w))
+            cross_distance = 0 if cross_overlap > 0 else abs(cand_mid_y - cur_mid_y)
+            main_distance = abs(cand_mid_x - cur_mid_x)
+        else:
+            # English: horizontal overlap keeps up/down movement in the same visual column.
+            # Русский: горизонтальное пересечение удерживает up/down над текущей колонкой.
+            cross_overlap = max(
+                0,
+                min(current.x + current.w, candidate.x + candidate.w) - max(current.x, candidate.x),
+            )
+            if dy > 0:
+                main_gap = max(0, candidate.y - (current.y + current.h))
+            else:
+                main_gap = max(0, current.y - (candidate.y + candidate.h))
+            cross_distance = 0 if cross_overlap > 0 else abs(cand_mid_x - cur_mid_x)
+            main_distance = abs(cand_mid_y - cur_mid_y)
+
+        cross_penalty = 0 if cross_overlap > 0 else 1
+        return (cross_penalty, main_gap, cross_distance, main_distance, idx)
 
     def _drill_in(self) -> None:
         """Enter the selected directory."""
@@ -2033,6 +2143,18 @@ class LintreeApp:
                     self.cursor = idx
                     break
 
+    def _toggle_display_metric(self) -> None:
+        """Switch treemap weights between byte size and file count."""
+
+        selected = self.cells[self.cursor].node if self.cells and self.cursor < len(self.cells) else None
+        self.display_metric = DISPLAY_METRIC_FILES if self.display_metric == DISPLAY_METRIC_SIZE else DISPLAY_METRIC_SIZE
+        self._rebuild_layout()
+        if selected is not None:
+            for idx, cell in enumerate(self.cells):
+                if cell.node is selected:
+                    self.cursor = idx
+                    break
+
     def _rebuild_layout(self) -> None:
         """Recompute visible treemap cells for the focused directory.
 
@@ -2051,8 +2173,8 @@ class LintreeApp:
         tm_h = self.height - BREADCRUMB_H - STATUS_BAR_H
         if tm_h < 3:
             tm_h = 3
-        children = self.focus.top_children(MAX_VISIBLE_CELLS)
-        self.cells = layout_treemap(children, Rect(0, 0, tm_w, tm_h), 0, self.wide_layout)
+        children = self.focus.top_children(MAX_VISIBLE_CELLS, self.display_metric)
+        self.cells = layout_treemap(children, Rect(0, 0, tm_w, tm_h), 0, self.wide_layout, self.display_metric)
         if self.cursor >= len(self.cells):
             self.cursor = max(0, len(self.cells) - 1)
 
@@ -2132,8 +2254,8 @@ class LintreeApp:
             parts.insert(0, node.name)
             node = node.parent
 
-        size = size_text(self.focus.size)
-        available = max(1, self.width - rune_len(size) - 3)
+        active_value = metric_text(self.focus, self.display_metric)
+        available = max(1, self.width - rune_len(active_value) - 3)
         crumbs = collapse_breadcrumb(parts, " › ", available)
 
         x = 1
@@ -2145,7 +2267,7 @@ class LintreeApp:
             canvas.text(x, 0, part, part_style)
             x += rune_len(part)
 
-        canvas.text(self.width - rune_len(size) - 1, 0, size, style(AMBER, BG_BAR))
+        canvas.text(self.width - rune_len(active_value) - 1, 0, active_value, style(AMBER, BG_BAR))
 
     def _draw_treemap(self, canvas: Canvas) -> None:
         """Draw colored treemap cells and labels."""
@@ -2156,11 +2278,12 @@ class LintreeApp:
                 canvas.text(max(0, (self.width - rune_len(message)) // 2), self.height // 2, message, style(FG_DIM, BG_MAIN))
             return
 
-        max_size = max(cell.node.size for cell in self.cells) or 1
+        max_value = max(node_metric(cell.node, self.display_metric) for cell in self.cells) or 1
         for idx, cell in enumerate(self.cells):
             rect = cell.rect
             base = color_for(cell.node.name, cell.node.is_dir)
-            brightness = min(1.0, 0.65 + 0.35 * (float(cell.node.size) / float(max_size)))
+            cell_value = node_metric(cell.node, self.display_metric)
+            brightness = min(1.0, 0.65 + 0.35 * (float(cell_value) / float(max_value)))
             bg = dim_color(base, brightness)
             fg = contrast_fg(bg)
             selected = idx == self.cursor
@@ -2172,28 +2295,77 @@ class LintreeApp:
             canvas.fill_rect(rect.x, y0, rect.w, rect.h, " ", cell_style)
 
             if selected:
-                border = style((20, 20, 20), AMBER)
-                for dx in range(rect.w):
-                    canvas.set(rect.x + dx, y0, "▀", border)
-                    canvas.set(rect.x + dx, y0 + rect.h - 1, "▄", border)
-                for dy in range(rect.h):
-                    canvas.set(rect.x, y0 + dy, "▐", border)
-                    canvas.set(rect.x + rect.w - 1, y0 + dy, "▌", border)
+                self._draw_selected_cell_border(canvas, rect, y0, bg)
             else:
-                border = style(fg, dim_color(bg, 0.5))
-                if rect.w > 1:
-                    canvas.fill_rect(rect.x + rect.w - 1, y0, 1, rect.h, " ", border)
-                if rect.h > 1:
-                    canvas.fill_rect(rect.x, y0 + rect.h - 1, rect.w, 1, " ", border)
+                self._draw_cell_separators(canvas, rect, y0, bg)
 
             if rect.w >= 4 and rect.h >= 1:
                 label = truncate(cell.node.name, rect.w - 2)
                 label_y = y0 if rect.h == 1 else y0 + 1
                 canvas.text(rect.x + 1, label_y, label, style(fg, bg, True))
                 if rect.h >= 3 and rect.w >= 6:
-                    size = size_text(cell.node.size)
-                    if rune_len(size) <= rect.w - 2:
-                        canvas.text(rect.x + 1, y0 + 2, size, style(fg, bg))
+                    active_value = metric_text(cell.node, self.display_metric)
+                    if rune_len(active_value) <= rect.w - 2:
+                        canvas.text(rect.x + 1, y0 + 2, active_value, style(fg, bg))
+
+    def _draw_selected_cell_border(self, canvas: Canvas, rect: Rect, y0: int, bg: RGB) -> None:
+        """Draw the selected treemap cell with box-drawing characters.
+
+        Args:
+            canvas (Canvas): Frame buffer to draw into.
+            rect (Rect): Cell rectangle.
+            y0 (int): Screen Y coordinate adjusted for breadcrumb height.
+            bg (RGB): Cell background color.
+
+        Returns:
+            None: The canvas is updated in-place.
+        """
+
+        border = style(AMBER, bg, True)
+        if rect.w <= 0 or rect.h <= 0:
+            return
+        if rect.w == 1:
+            for dy in range(rect.h):
+                canvas.set(rect.x, y0 + dy, "│", border)
+            return
+        if rect.h == 1:
+            for dx in range(rect.w):
+                canvas.set(rect.x + dx, y0, "─", border)
+            return
+
+        canvas.set(rect.x, y0, "┌", border)
+        canvas.set(rect.x + rect.w - 1, y0, "┐", border)
+        canvas.set(rect.x, y0 + rect.h - 1, "└", border)
+        canvas.set(rect.x + rect.w - 1, y0 + rect.h - 1, "┘", border)
+        for dx in range(1, rect.w - 1):
+            canvas.set(rect.x + dx, y0, "─", border)
+            canvas.set(rect.x + dx, y0 + rect.h - 1, "─", border)
+        for dy in range(1, rect.h - 1):
+            canvas.set(rect.x, y0 + dy, "│", border)
+            canvas.set(rect.x + rect.w - 1, y0 + dy, "│", border)
+
+    def _draw_cell_separators(self, canvas: Canvas, rect: Rect, y0: int, bg: RGB) -> None:
+        """Draw subtle semigraphic separators for a treemap cell.
+
+        Args:
+            canvas (Canvas): Frame buffer to draw into.
+            rect (Rect): Cell rectangle.
+            y0 (int): Screen Y coordinate adjusted for breadcrumb height.
+            bg (RGB): Cell background color.
+
+        Returns:
+            None: The canvas is updated in-place.
+        """
+
+        separator = style(dim_color(bg, 0.45), bg)
+        if rect.w > 1:
+            for dy in range(rect.h):
+                canvas.set(rect.x + rect.w - 1, y0 + dy, "│", separator)
+        if rect.h > 1:
+            for dx in range(rect.w):
+                canvas.set(rect.x + dx, y0 + rect.h - 1, "─", separator)
+        if rect.w > 1 and rect.h > 1:
+            canvas.set(rect.x + rect.w - 1, y0 + rect.h - 1, "┘", separator)
 
     def _draw_sidebar(self, canvas: Canvas) -> None:
         """Draw selected-node details in the right sidebar."""
@@ -2222,12 +2394,15 @@ class LintreeApp:
 
         cat = category_for(node.name, node.is_dir)
         y = self._sidebar_kv(canvas, pad, y, label_w, "Type", CATEGORY_LABELS[cat], label_style, style(CATEGORY_COLORS[cat], BG_SIDEBAR))
+        metric_name = "Files" if self.display_metric == DISPLAY_METRIC_FILES else "Size"
+        y = self._sidebar_kv(canvas, pad, y, label_w, "View", metric_name, label_style, style(AMBER, BG_SIDEBAR, True))
         y = self._sidebar_kv(canvas, pad, y, label_w, "Size", size_text(node.size), label_style, style(RED, BG_SIDEBAR, True))
         if node.is_dir:
             y = self._sidebar_kv(canvas, pad, y, label_w, "Files", count_text(node.file_count), label_style, value_style)
             y = self._sidebar_kv(canvas, pad, y, label_w, "Folders", count_text(node.dir_count), label_style, value_style)
-        if self.focus is not None and self.focus.size > 0:
-            pct = float(node.size) / float(self.focus.size) * 100.0
+        parent_value = node_metric(self.focus, self.display_metric) if self.focus is not None else 0
+        if parent_value > 0:
+            pct = float(node_metric(node, self.display_metric)) / float(parent_value) * 100.0
             y = self._sidebar_kv(canvas, pad, y, label_w, "% Parent", f"{pct:.1f}%", label_style, value_style)
 
         y = self._sidebar_divider(canvas, pad, y, width, div_style)
@@ -2239,13 +2414,14 @@ class LintreeApp:
         if node.is_dir and node.children and y < self.height - 1:
             y = self._sidebar_line(canvas, pad, y, "Top Items", title_style)
             max_items = min(10, max(0, self.height - 2 - y))
-            for child in node.children[:max_items]:
-                child_color = color_for(child.name, child.is_dir)
-                size = size_text(child.size)
-                max_name = max(4, width - rune_len(size) - 3)
-                name = "▪ " + truncate(child.name, max_name)
-                y = self._sidebar_line(canvas, pad, y, name, style(child_color, BG_SIDEBAR))
-                canvas.text(pad + width - rune_len(size), y - 1, size, value_style)
+            if max_items > 0:
+                for child in node.top_children(max_items, self.display_metric):
+                    child_color = color_for(child.name, child.is_dir)
+                    active_value = metric_text(child, self.display_metric)
+                    max_name = max(4, width - rune_len(active_value) - 3)
+                    name = "▪ " + truncate(child.name, max_name)
+                    y = self._sidebar_line(canvas, pad, y, name, style(child_color, BG_SIDEBAR))
+                    canvas.text(pad + width - rune_len(active_value), y - 1, active_value, value_style)
 
     def _sidebar_line(self, canvas: Canvas, x: int, y: int, text: str, line_style: Style) -> int:
         """Draw one sidebar line and return the next y."""
@@ -2288,8 +2464,9 @@ class LintreeApp:
         canvas.fill_rect(0, y, self.width, 1, " ", STYLE_BAR)
         left = f" {size_text(self.focus.size)}  {count_text(self.focus.file_count)} files  {count_text(self.focus.dir_count)} dirs"
         layout_name = "wide" if self.wide_layout else "square"
+        metric_name = "files" if self.display_metric == DISPLAY_METRIC_FILES else "size"
         scan_mode = "fast" if self.fast else "normal"
-        right = f"scan:{scan_mode}  o:{layout_name}  arrows:move  Enter:open  Bksp:back  ?:help  q:quit "
+        right = f"scan:{scan_mode}  o:{layout_name}  m:{metric_name}  arrows:spatial  j/k:list  Enter:open  Bksp:back  q:quit "
         max_left = max(0, self.width - rune_len(right) - 1)
         canvas.text(0, y, truncate(left, max_left), STYLE_BAR)
         if rune_len(right) < self.width:
@@ -2300,8 +2477,8 @@ class LintreeApp:
 
         canvas.fill_rect(0, 0, self.width, self.height, " ", style(FG_DIM, BG_MAIN))
         sections = [
-            ("Navigation", [("↑↓ / j k", "Navigate cells"), ("←→", "Spatial move"), ("Enter / l", "Drill into dir"), ("Bksp / h", "Go back")]),
-            ("Actions", [("o", "Toggle layout"), ("Esc", "Back / quit"), ("?", "Toggle help"), ("q / Ctrl+C", "Quit")]),
+            ("Navigation", [("arrows", "Spatial move"), ("j / k", "Visual order"), ("Enter / l", "Drill into dir"), ("Bksp / h", "Go back")]),
+            ("Actions", [("o", "Toggle layout"), ("m", "Toggle size/files"), ("Esc", "Back / quit"), ("?", "Toggle help"), ("q / Ctrl+C", "Quit")]),
         ]
         inner_w = 34
         key_col = 14
@@ -2496,11 +2673,12 @@ Compatibility:
   -fast is accepted as an alias for --fast.
 
 Controls:
-  arrows / j k        Navigate cells
-  left/right arrows   Spatial movement
+  arrows              Spatial movement
+  j / k               Visual previous/next
   Enter / l           Drill into directory
   Backspace / h       Go back
   o                   Toggle wide/square layout
+  m                   Toggle size/files display
   ?                   Help overlay
   q / Ctrl+C          Quit
 """

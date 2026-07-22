@@ -11,6 +11,7 @@ component "TerminalController" as Terminal
 component "ScanJob" as Job
 component "ConcurrentScanner" as Scanner
 component "Дерево FileNode" as Tree
+component "Метрика отображения\nsize / files" as Metric
 component "Раскладка Treemap" as Layout
 component "Canvas Renderer" as Canvas
 
@@ -20,6 +21,9 @@ App --> Job : старт сканирования
 Job --> Scanner : пул рабочих потоков
 Scanner --> Tree : заполнение узлов
 App --> Tree : фокус и навигация
+App --> Metric : текущий режим просмотра
+Metric --> Tree : ранжирование видимых элементов
+Metric --> Layout : веса узлов
 App --> Layout : видимые дочерние элементы
 Layout --> App : ячейки
 App --> Canvas : отрисовка кадра
@@ -34,6 +38,8 @@ end note
 note bottom of Layout
 Поддерживает wide-режим
 и square-режим treemap.
+Взвешивает ячейки по
+размеру или числу файлов.
 end note
 
 @enduml

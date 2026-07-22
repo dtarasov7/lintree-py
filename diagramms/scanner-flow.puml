@@ -28,8 +28,9 @@ while (Pending directories?) is (yes)
   endif
 endwhile (no)
 
-:Compute aggregate directory sizes;
-:Sort children by size descending;
+:Compute aggregate directory sizes and file counts;
+:Sort stored children by size descending;
+:Keep file counts for files display metric;
 :Return FileNode tree;
 stop
 

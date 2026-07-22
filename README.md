@@ -1,6 +1,6 @@
 # lintree-py
 
-[![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.2.0-blue.svg)](CHANGELOG.md)
 
 `lintree-py.py` is a single-file Python 3.8 terminal disk usage visualizer inspired by lintree. It scans a directory tree, computes disk usage, and renders an interactive colored treemap directly in the terminal.
 
@@ -11,11 +11,13 @@ The implementation uses only the Python standard library.
 - Concurrent filesystem scanner with bounded worker threads.
 - Directory exclusions by name or path, plus NFS/CIFS/SMB mount exclusions.
 - Wide horizontal treemap layout by default, plus original square layout.
+- Interactive display metric toggle: size-based view or file-count view.
 - Color coding by file type: source code, web files, documents, images, video, audio, archives, data, binaries, directories, and other files.
-- Brightness scaling by file size so larger items stand out.
+- Brightness scaling by the active display metric so larger or file-heavy items stand out.
+- Semigraphic treemap borders with a clearer selected-cell outline.
 - Interactive drill-down into directories and back navigation.
 - Breadcrumb bar showing the current location.
-- Sidebar with selected item name, type, size, path, parent percentage, and top children.
+- Sidebar with selected item name, type, active view, size, file counts, path, parent percentage, and top children.
 - Scan mode indicator on the progress screen and status bar.
 - Keyboard and mouse selection support where the terminal supports mouse reporting.
 - Linux, macOS, and Windows support using ANSI escape sequences and standard-library input handling.
@@ -59,11 +61,12 @@ path                  Directory to scan. Defaults to the current directory.
 
 | Key | Action |
 |---|---|
-| `↑` `↓` / `j` `k` | Move through cells in visual reading order |
-| `←` `→` | Move spatially inside the current visual row |
+| `↑` `↓` `←` `→` | Move spatially to a neighboring cell |
+| `j` / `k` | Move through cells in visual reading order |
 | `Enter` / `l` | Open selected directory |
 | `Backspace` / `h` | Go back |
 | `o` | Toggle wide/square layout |
+| `m` | Toggle size/files display metric |
 | `?` | Toggle help overlay |
 | `q` / `Ctrl+C` | Quit |
 | Mouse click | Select a cell |
@@ -74,13 +77,20 @@ path                  Directory to scan. Defaults to the current directory.
 
 `square` mode keeps the original squarified treemap behavior, which favors compact rectangles with balanced aspect ratios.
 
+## Display Metrics
+
+Press `m` to switch the treemap between `size` and `files` views.
+
+In `size` view, rectangle area, cell brightness, cell labels, `% Parent`, and top-child lists are based on disk usage. In `files` view, the same UI is based on file counts, so directories with many small files become visible even when they use little space.
+
 ## Architecture
 
 The project is intentionally kept as one file:
 
 - `ConcurrentScanner` builds a `FileNode` tree using worker threads.
 - `compute_sizes_and_sort` computes aggregate directory sizes and counts.
-- `layout_treemap` converts top-level children into treemap rectangles.
+- `node_metric` selects size or file-count weights for rendering.
+- `layout_treemap` converts top-level children into treemap rectangles using the active display metric.
 - `Canvas` renders an off-screen frame into ANSI truecolor output.
 - `TerminalController` manages raw terminal mode and keyboard/mouse input.
 - `LintreeApp` coordinates scanning, navigation, layout, and rendering.
